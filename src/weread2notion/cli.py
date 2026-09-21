@@ -783,57 +783,190 @@ def resolve_data_source_id(notion_id):
 
 def sync():
     global client, data_source_id, weread
+
     secrets = validate_secret_inputs()
+
     notion_id = extract_notion_id()
     notion_token = secrets["notion_token"]
-    weread = WeReadGatewayClient(secrets["weread_api_key"])
+
+    weread = WeReadGatewayClient(
+        secrets["weread_api_key"]
+    )
+
     client = Client(
         auth=notion_token,
         log_level=logging.ERROR,
         notion_version=NOTION_VERSION,
     )
+
     data_source_id = resolve_data_source_id(notion_id)
+
     print(f"Notion API Version: {NOTION_VERSION}")
     print(f"Notion Data Source ID: {data_source_id}")
+
     load_data_source_schema()
-    latest_sort = get_sort()
+
     books = get_notebooklist()
-    if books != None:
-        for index, book in enumerate(books):
-            sort = book["sort"]
-            if sort <= latest_sort:
-                continue
-            book = book.get("book") or book
-            title = book.get("title") or ""
-            cover = (book.get("cover") or "").replace("/s_", "/t7_")
-            bookId = book.get("bookId")
-            author = book.get("author") or ""
-            if not bookId:
-                continue
-            categories = book.get("categories")
-            if categories != None:
-                categories = [x["title"] for x in categories]
-            print(f"正在同步 {title} ,一共{len(books)}本，当前是第{index+1}本。")
-            check(bookId)
-            if has_any_property(("ISBN", "评分")):
-                isbn, rating = get_bookinfo(bookId)
-            else:
-                isbn, rating = "", None
-            id = insert_to_notion(
-                title, bookId, cover, sort, author, isbn, rating, categories
+
+    if not books:
+        print("微信读书没有获取到书籍")
+        return
+
+    print(f"共获取 {len(books)} 本书")
+
+    for index, item in enumerate(books):
+        sort = item.get("sort") or 0
+
+        book = item.get("book") or item
+
+        title = book.get("title") or ""
+        cover = (book.get("cover") or "").replace(
+            "/s_",
+            "/t7_",
+        )
+
+        book_id = book.get("bookId")
+
+        author = book.get("author") or ""
+
+        if not book_id:
+            continue
+
+        categories = book.get("categories")
+
+        if categories is not None:
+            categories = [
+                x.get("title")
+                for x in categories
+                if x.get("title")
+            ]
+
+        print(
+            f"[{index + 1}/{len(books)}] 正在同步：{title}"
+        )
+
+        # -------------------------------------------------
+        # 1. 查找 Notion 中是否已经存在
+        # -------------------------------------------------
+
+        existing_page = find_existing_book(book_id)
+
+        # -------------------------------------------------
+        # 2. 获取书籍基本信息
+        # -------------------------------------------------
+
+        if has_any_property(("ISBN", "评分")):
+            isbn, rating = get_bookinfo(book_id)
+        else:
+            isbn, rating = "", None
+
+        # -------------------------------------------------
+        # 3. 不存在 → 创建书籍页面
+        # -------------------------------------------------
+
+        if existing_page is None:
+
+            print(f"  → Notion 中不存在，创建：《{title}》")
+
+            page_id = insert_to_notion(
+                title,
+                book_id,
+                cover,
+                sort,
+                author,
+                isbn,
+                rating,
+                categories,
             )
-            chapter = get_chapter_info(bookId)
-            bookmark_list = get_bookmark_list(bookId)
-            summary, reviews = get_review_list(bookId)
-            bookmark_list.extend(reviews)
-            bookmark_list = sorted(
-                bookmark_list,
-                key=lambda x: get_note_sort_key(x, chapter),
+
+            existing_texts = set()
+
+        # -------------------------------------------------
+        # 4. 已存在 → 保留原页面
+        # -------------------------------------------------
+
+        else:
+
+            page_id = existing_page["id"]
+
+            print(
+                f"  → Notion 已存在，执行增量同步：《{title}》"
             )
-            children, grandchild = get_children(chapter, summary, bookmark_list)
-            results = add_children(id, children)
-            if len(grandchild) > 0 and results != None:
-                add_grandchild(grandchild, results)
+
+            existing_texts = get_existing_texts(
+                page_id
+            )
+
+        # -------------------------------------------------
+        # 5. 获取微信读书内容
+        # -------------------------------------------------
+
+        chapter = get_chapter_info(book_id)
+
+        bookmark_list = get_bookmark_list(book_id)
+
+        summary, reviews = get_review_list(book_id)
+
+        bookmark_list.extend(reviews)
+
+        bookmark_list.sort(
+            key=lambda x: get_note_sort_key(
+                x,
+                chapter,
+            )
+        )
+
+        # -------------------------------------------------
+        # 6. 没有任何划线/笔记
+        # -------------------------------------------------
+
+        if not bookmark_list and not summary:
+
+            print(
+                f"  → 《{title}》没有划线或笔记，仅同步书籍信息"
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # 7. 生成 Notion Blocks
+        # -------------------------------------------------
+
+        children, grandchild = get_children(
+            chapter,
+            summary,
+            bookmark_list,
+        )
+
+        # -------------------------------------------------
+        # 8. 过滤已经同步过的内容
+        # -------------------------------------------------
+
+        new_children = filter_new_children(
+            children,
+            existing_texts,
+        )
+
+        if not new_children:
+
+            print(
+                f"  → 《{title}》没有新的划线/笔记"
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # 9. 增量追加
+        # -------------------------------------------------
+
+        results = add_children(
+            page_id,
+            new_children,
+        )
+
+        print(
+            f"  → 《{title}》新增 {len(new_children)} 个内容块"
+        )
 
 
 def main(argv=None):
