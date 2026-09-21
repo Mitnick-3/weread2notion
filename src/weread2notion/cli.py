@@ -1,4 +1,31 @@
 from retrying import retry
+import argparse
+import logging
+import os
+import re
+import time
+from notion_client import Client
+import requests
+from datetime import datetime
+import hashlib
+from dotenv import load_dotenv
+from notion_client.errors import APIResponseError
+from retrying import retry
+from .blocks import (
+    get_callout,
+    get_date,
+    get_heading,
+    get_icon,
+    get_multi_select,
+    get_number,
+    get_quote,
+    get_rich_text,
+    get_select,
+    get_status,
+    get_title,
+    get_url,
+)
+
 
 # ========== 新增：根据BookId查询Notion页面，返回page_id或None ==========
 def find_book_page_by_bookid(bookId):
@@ -173,3 +200,23 @@ def sync():
             results = add_children(id, children)
             if len(grandchild) > 0 and results != None:
                 add_grandchild(grandchild, results)
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="weread2notion",
+        description="Sync WeRead highlights and notes to Notion.",
+    )
+    parser.add_argument(
+        "command",
+        nargs="?",
+        default="sync",
+        choices=["sync"],
+        help="Command to run. Defaults to sync.",
+    )
+    parser.parse_args(argv)
+    try:
+        sync()
+    except ConfigError:
+        raise SystemExit(1)
+
+if __name__ == "__main__":
+    main()
