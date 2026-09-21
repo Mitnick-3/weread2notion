@@ -440,34 +440,64 @@ def get_chapter_info(bookId):
 
 
 def get_notebooklist():
-    """获取微信读书书架列表"""
+    """
+    获取微信读书完整书架列表。
+
+    旧版本使用 /user/notebooks。
+    但 /user/notebooks 的语义是“所有有笔记的书”，
+    因此没有划线/笔记的书会从源头被过滤掉。
+
+    这里改用 /shelf/sync 获取完整电子书书架。
+    阅读进度、阅读时长、是否读完等信息再由
+    /book/getprogress 按书单独获取。
+    """
+    data = weread.request(
+        "/shelf/sync",
+    )
+
+    shelf_books = data.get("books") or []
+
     books = []
-    hasMore = 1
-    lastSort = None
 
-    while hasMore:
-        params = {
-            "count": 100,
-        }
+    for index, item in enumerate(shelf_books):
+        if not isinstance(item, dict):
+            continue
 
-        if lastSort is not None:
-            params["lastSort"] = lastSort
+        book_id = item.get("bookId")
 
-        data = weread.request(
-            "/user/notebooks",
-            **params,
+        if not book_id:
+            continue
+
+        # /shelf/sync 返回的是扁平书籍对象，
+        # 而主同步流程兼容旧的 {book: {...}, sort: ...} 结构。
+        book = dict(item)
+
+        # 保留原有排序字段，避免改变 Notion 中的 Sort 逻辑。
+        # 书架接口没有 /user/notebooks 的 note-sort，
+        # 因此这里使用书架顺序作为稳定排序。
+        book["sort"] = (
+            item.get("sort")
+            or item.get("updateTime")
+            or item.get("readUpdateTime")
+            or index
         )
 
-        hasMore = data.get("hasMore", 0)
-
-        batch = data.get("books") or []
-
-        books.extend(batch)
-
-        if batch:
-            lastSort = batch[-1].get("sort")
+        # 主流程原本从 book["categories"] 读取分类。
+        # /shelf/sync 返回的是 category 字符串，因此转换成兼容结构。
+        category = item.get("category")
+        if category:
+            book["categories"] = [
+                {"title": category}
+            ]
         else:
-            hasMore = 0
+            book["categories"] = []
+
+        books.append(
+            {
+                "book": book,
+                "sort": book["sort"],
+            }
+        )
 
     books.sort(
         key=lambda x: x.get("sort") or 0
