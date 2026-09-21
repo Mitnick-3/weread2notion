@@ -267,15 +267,73 @@ def get_review_list(bookId):
     return summary, reviews
 
 
-def check(bookId):
-    """检查是否已经插入过 如果已经插入了就删除"""
-    filter = build_equals_filter("BookId", bookId)
-    response = query_data_source(filter=filter)
-    for result in response["results"]:
-        try:
-            client.blocks.delete(block_id=result["id"])
-        except Exception as e:
-            print(f"删除块时出错: {e}")
+def find_existing_book(book_id):
+    """根据 BookId 查找已经同步到 Notion 的书籍页面"""
+    filter = build_equals_filter("BookId", book_id)
+    response = query_data_source(
+        filter=filter,
+        page_size=10,
+    )
+
+    results = response.get("results") or []
+
+    if not results:
+        return None
+
+    return results[0]
+
+def get_page_children(page_id):
+    """获取 Notion 页面已有的所有 block"""
+    results = []
+    start_cursor = None
+
+    while True:
+        body = {"page_size": 100}
+
+        if start_cursor:
+            body["start_cursor"] = start_cursor
+
+        response = client.blocks.children.list(
+            block_id=page_id,
+            **body,
+        )
+
+        results.extend(response.get("results") or [])
+
+        if not response.get("has_more"):
+            break
+
+        start_cursor = response.get("next_cursor")
+
+    return results
+
+def get_block_text(block):
+    """提取 Notion block 中的纯文本"""
+    block_type = block.get("type")
+
+    data = block.get(block_type) or {}
+
+    rich_text = data.get("rich_text") or []
+
+    return "".join(
+        item.get("plain_text") or ""
+        for item in rich_text
+    )
+
+
+def get_existing_texts(page_id):
+    """获取页面中已经存在的文本"""
+    blocks = get_page_children(page_id)
+
+    texts = set()
+
+    for block in blocks:
+        text = get_block_text(block)
+
+        if text:
+            texts.add(text)
+
+    return texts
 
 
 @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -336,16 +394,59 @@ def insert_to_notion(bookName, bookId, cover, sort, author, isbn, rating, catego
     return id
 
 
-def add_children(id, children):
-    results = []
-    for i in range(0, len(children) // 100 + 1):
-        time.sleep(0.3)
-        response = client.blocks.children.append(
-            block_id=id, children=children[i * 100 : (i + 1) * 100]
-        )
-        results.extend(response.get("results"))
-    return results if len(results) == len(children) else None
+def add_children_incremental(page_id, children, existing_texts):
+    """只向 Notion 追加不存在的内容"""
+    new_children = []
 
+    for child in children:
+        text = get_block_text(child)
+
+        # 有文本且已经存在，跳过
+        if text and text in existing_texts:
+            continue
+
+        new_children.append(child)
+
+    if not new_children:
+        return []
+
+    results = []
+
+    for i in range(0, len(new_children), 100):
+        batch = new_children[i:i + 100]
+
+        time.sleep(0.3)
+
+        response = client.blocks.children.append(
+            block_id=page_id,
+            children=batch,
+        )
+
+        results.extend(response.get("results") or [])
+
+    return results
+    
+def is_content_block(block):
+    return block.get("type") in {
+        "callout",
+        "quote",
+    }
+def filter_new_children(children, existing_texts):
+    """只过滤已经同步过的划线和笔记，章节标题不参与去重"""
+    result = []
+
+    for child in children:
+        block_type = child.get("type")
+
+        if block_type in {"callout", "quote"}:
+            text = get_block_text(child)
+
+            if text and text in existing_texts:
+                continue
+
+        result.append(child)
+
+    return result
 
 def add_grandchild(grandchild, results):
     for key, value in grandchild.items():
