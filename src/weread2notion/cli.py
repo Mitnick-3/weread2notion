@@ -30,6 +30,7 @@ from .blocks import (
 client = None
 data_source_id = None
 data_source_property_types = {}
+data_source_property_configs = {}
 title_property_name = None
 skipped_property_names = set()
 weread = None
@@ -511,6 +512,7 @@ def query_data_source(**body):
 def load_data_source_schema():
     """读取当前 data source 的真实属性。"""
     global data_source_property_types
+    global data_source_property_configs
     global title_property_name
     global skipped_property_names
 
@@ -521,6 +523,7 @@ def load_data_source_schema():
 
     properties = response.get("properties") or {}
 
+    data_source_property_configs = properties
     data_source_property_types = {
         name: (config or {}).get("type")
         for name, config in properties.items()
@@ -706,14 +709,26 @@ def normalize_date_value(value):
     return value
 
 
-def build_option_property(prop_type, value):
+def get_status_option_names(name):
+    config = data_source_property_configs.get(name) or {}
+    status_config = config.get("status") or {}
+    options = status_config.get("options") or []
+    return {str(item.get("name")) for item in options if item.get("name")}
+
+
+def build_option_property(prop_type, value, property_name=None):
     names = to_name_list(value)
 
     if not names:
         return None
 
     if prop_type == "status":
-        return get_status(names[0])
+        option_name = names[0]
+        if property_name:
+            allowed = get_status_option_names(property_name)
+            if allowed and option_name not in allowed:
+                return None
+        return get_status(option_name)
 
     if prop_type == "select":
         return get_select(names[0])
@@ -762,6 +777,7 @@ def build_notion_property(name, value):
         return build_option_property(
             prop_type,
             value,
+            property_name=name,
         )
 
     if prop_type == "date":
@@ -1111,32 +1127,42 @@ def add_children(page_id, children):
     return results
 
 
-def insert_to_notion(
+def format_reading_time(seconds):
+    seconds = int(to_number(seconds) or 0)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+
+    parts = []
+    if hours > 0:
+        parts.append(f"{hours}时")
+    if minutes > 0:
+        parts.append(f"{minutes}分")
+
+    return "".join(parts) or "0分"
+
+
+def build_book_raw_properties(
     bookName,
     bookId,
-    cover,
     sort,
     author,
     isbn,
     rating,
     categories,
+    read_info=None,
 ):
-    """创建新的 Notion 书籍页面。"""
+    """
+    创建/更新书籍时统一使用这一套属性。
 
-    if (
-        not cover
-        or not cover.startswith("http")
-    ):
-        cover = (
-            "https://www.notion.so/icons/"
-            "book_gray.svg"
-        )
-
-    parent = {
-        "type": "data_source_id",
-        "data_source_id": data_source_id,
-    }
-
+    关键点：
+    - 书籍属性同步与划线/笔记同步完全独立。
+    - 每次 sync 都更新阅读进度。
+    - markedStatus:
+        1 = 未开始
+        2 = 在读
+        4 = 读完
+    - 如果 Notion 没有“未读”这个 status option，未开始时不写非法 option。
+    """
     raw_properties = {
         title_property_name: bookName,
         "BookId": bookId,
@@ -1153,81 +1179,75 @@ def insert_to_notion(
     if categories is not None:
         raw_properties["分类"] = categories
 
-    read_info = (
-        get_read_info(bookId=bookId)
-        if has_any_property(
-            (
-                "状态",
-                "阅读时长",
-                "阅读进度",
-                "时间",
-            )
-        )
-        else None
-    )
-
     if read_info is not None:
-        markedStatus = read_info.get(
-            "markedStatus",
-            0,
-        )
+        marked_status = read_info.get("markedStatus", 1)
+        reading_time = read_info.get("readingTime", 0)
+        reading_progress = read_info.get("readingProgress", 0)
+        finished_date = read_info.get("finishedDate") or 0
 
-        readingTime = read_info.get(
-            "readingTime",
-            0,
-        )
+        if marked_status == 4:
+            raw_properties["状态"] = "读完"
+        elif marked_status == 2:
+            raw_properties["状态"] = "在读"
+        else:
+            # 不假设 Notion 中存在“未读”选项。
+            # 如果模板没有“未读”，build_notion_property 会跳过它。
+            if "未读" in get_status_option_names("状态"):
+                raw_properties["状态"] = "未读"
+            else:
+                # 不发送非法 status option。
+                # 这样不会因为一个“未开始”的书导致整本书属性更新失败。
+                raw_properties.pop("状态", None)
 
-        readingProgress = read_info.get(
-            "readingProgress",
-            0,
-        )
+        raw_properties["阅读时长"] = format_reading_time(reading_time)
+        raw_properties["阅读进度"] = reading_progress
 
-        format_time = ""
+        if finished_date:
+            raw_properties["时间"] = datetime.utcfromtimestamp(
+                finished_date
+            ).strftime("%Y-%m-%d %H:%M:%S")
 
-        hour = readingTime // 3600
+    return raw_properties
 
-        if hour > 0:
-            format_time += f"{hour}时"
 
-        minutes = (
-            readingTime % 3600 // 60
-        )
+def insert_to_notion(
+    bookName,
+    bookId,
+    cover,
+    sort,
+    author,
+    isbn,
+    rating,
+    categories,
+    read_info=None,
+):
+    """创建新的 Notion 书籍页面。"""
 
-        if minutes > 0:
-            format_time += f"{minutes}分"
+    if not cover or not cover.startswith("http"):
+        cover = "https://www.notion.so/icons/book_gray.svg"
 
-        raw_properties["状态"] = (
-            "读完"
-            if markedStatus == 4
-            else "在读"
-        )
+    parent = {
+        "type": "data_source_id",
+        "data_source_id": data_source_id,
+    }
 
-        raw_properties["阅读时长"] = (
-            format_time
-        )
+    if read_info is None and has_any_property(
+        ("状态", "阅读时长", "阅读进度", "时间")
+    ):
+        read_info = get_read_info(bookId)
 
-        raw_properties["阅读进度"] = (
-            readingProgress
-        )
-
-        if "finishedDate" in read_info:
-            finished_date = read_info.get(
-                "finishedDate"
-            )
-
-            if finished_date:
-                raw_properties["时间"] = (
-                    datetime.utcfromtimestamp(
-                        finished_date
-                    ).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    )
-                )
-
-    properties = build_notion_properties(
-        raw_properties
+    raw_properties = build_book_raw_properties(
+        bookName=bookName,
+        bookId=bookId,
+        sort=sort,
+        author=author,
+        isbn=isbn,
+        rating=rating,
+        categories=categories,
+        read_info=read_info,
     )
 
+    properties = build_notion_properties(raw_properties)
     icon = get_icon(cover)
 
     response = client.pages.create(
@@ -1250,109 +1270,95 @@ def update_existing_book_properties(
     isbn,
     rating,
     categories,
+    read_info=None,
 ):
     """
     更新已经存在的书籍属性。
 
-    这样书名、作者、评分、阅读进度等发生变化时，
-    不需要删除 Notion 页面。
+    不删除页面，不重建页面，不依赖是否存在划线/笔记。
+    所以即使一本书“没有划线、没有笔记、还没读完”，
+    它的阅读进度/状态/阅读时长仍然会更新。
     """
-
-    raw_properties = {
-        title_property_name: bookName,
-        "BookId": bookId,
-        "ISBN": isbn,
-        "链接": (
-            "https://weread.qq.com/web/reader/"
-            f"{calculate_book_str_id(bookId)}"
-        ),
-        "作者": author,
-        "Sort": sort,
-        "评分": rating,
-    }
-
-    if categories is not None:
-        raw_properties["分类"] = categories
-
-    if has_any_property(
-        (
-            "状态",
-            "阅读时长",
-            "阅读进度",
-            "时间",
-        )
+    if read_info is None and has_any_property(
+        ("状态", "阅读时长", "阅读进度", "时间")
     ):
-        read_info = get_read_info(
-            bookId=bookId
-        )
+        read_info = get_read_info(bookId)
 
-        markedStatus = read_info.get(
-            "markedStatus",
-            0,
-        )
-
-        readingTime = read_info.get(
-            "readingTime",
-            0,
-        )
-
-        readingProgress = read_info.get(
-            "readingProgress",
-            0,
-        )
-
-        format_time = ""
-
-        hour = readingTime // 3600
-
-        if hour > 0:
-            format_time += f"{hour}时"
-
-        minutes = (
-            readingTime % 3600 // 60
-        )
-
-        if minutes > 0:
-            format_time += f"{minutes}分"
-
-        raw_properties["状态"] = (
-            "读完"
-            if markedStatus == 4
-            else "在读"
-        )
-
-        raw_properties["阅读时长"] = (
-            format_time
-        )
-
-        raw_properties["阅读进度"] = (
-            readingProgress
-        )
-
-        finished_date = read_info.get(
-            "finishedDate"
-        )
-
-        if finished_date:
-            raw_properties["时间"] = (
-                datetime.utcfromtimestamp(
-                    finished_date
-                ).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
-            )
-
-    properties = build_notion_properties(
-        raw_properties
+    raw_properties = build_book_raw_properties(
+        bookName=bookName,
+        bookId=bookId,
+        sort=sort,
+        author=author,
+        isbn=isbn,
+        rating=rating,
+        categories=categories,
+        read_info=read_info,
     )
 
-    if not properties:
-        return
+    properties = build_notion_properties(raw_properties)
 
-    client.pages.update(
-        page_id=page_id,
-        properties=properties,
+    if properties:
+        client.pages.update(
+            page_id=page_id,
+            properties=properties,
+        )
+
+
+def sync_book_content(page_id, book_id, title, existing_keys=None):
+    """
+    单独负责划线/笔记增量同步。
+
+    书籍本身是否有划线，不影响前面的书籍属性同步。
+    """
+    if existing_keys is None:
+        existing_keys = get_existing_block_keys(page_id)
+
+    bookmark_list = get_bookmark_list(book_id)
+    summary, reviews = get_review_list(book_id)
+
+    # 没有任何内容时，直接结束。
+    if not bookmark_list and not reviews and not summary:
+        print(f"    → 《{title}》没有划线或笔记，书籍信息已同步")
+        return 0
+
+    # 只有确实存在内容时才请求章节，减少 API 请求。
+    chapter = get_chapter_info(book_id)
+
+    bookmark_list = list(bookmark_list)
+    bookmark_list.extend(reviews)
+    bookmark_list.sort(
+        key=lambda x: get_note_sort_key(x, chapter)
     )
+
+    children = get_children(
+        chapter,
+        summary,
+        bookmark_list,
+    )
+
+    if not children:
+        print(f"    → 《{title}》没有可写入的内容")
+        return 0
+
+    new_children = filter_new_children(
+        children,
+        existing_keys,
+    )
+
+    if not new_children:
+        print(f"    → 《{title}》没有新的划线/笔记")
+        return 0
+
+    results = add_children(
+        page_id,
+        new_children,
+    )
+
+    print(
+        f"    → 《{title}》新增 "
+        f"{len(results)} 个内容块"
+    )
+    return len(results)
 
 
 # =========================================================
@@ -1647,7 +1653,16 @@ def get_children(
                     get_quote(abstract)
                 )
 
-    if summary:
+    valid_summary = [
+        item
+        for item in (summary or [])
+        if (
+            (item.get("review") or {}).get("content")
+            or ""
+        ).strip()
+    ]
+
+    if valid_summary:
         children.append(
             get_heading(
                 1,
@@ -1655,7 +1670,7 @@ def get_children(
             )
         )
 
-        for item in summary:
+        for item in valid_summary:
             content = (
                 item.get("review") or {}
             ).get("content") or ""
@@ -1797,17 +1812,12 @@ def sync():
     global weread
 
     secrets = validate_secret_inputs()
-
     notion_id = extract_notion_id()
 
-    notion_token = secrets[
-        "notion_token"
-    ]
+    notion_token = secrets["notion_token"]
 
     weread = WeReadGatewayClient(
-        secrets[
-            "weread_api_key"
-        ]
+        secrets["weread_api_key"]
     )
 
     client = Client(
@@ -1816,157 +1826,115 @@ def sync():
         notion_version=NOTION_VERSION,
     )
 
-    data_source_id = (
-        resolve_data_source_id(
-            notion_id
-        )
-    )
+    data_source_id = resolve_data_source_id(notion_id)
 
-    print(
-        f"Notion API Version: "
-        f"{NOTION_VERSION}"
-    )
-
-    print(
-        f"Notion Data Source ID: "
-        f"{data_source_id}"
-    )
+    print(f"Notion API Version: {NOTION_VERSION}")
+    print(f"Notion Data Source ID: {data_source_id}")
 
     load_data_source_schema()
 
     books = get_notebooklist()
 
     if not books:
-        print(
-            "微信读书没有获取到书籍"
-        )
+        print("微信读书没有获取到书籍")
         return
 
-    print(
-        f"共获取 {len(books)} 本书"
-    )
+    print(f"共获取 {len(books)} 本书")
 
-    for index, item in enumerate(
-        books
-    ):
-        sort = item.get(
-            "sort"
-        ) or 0
+    success_count = 0
+    error_count = 0
+    new_book_count = 0
+    updated_book_count = 0
+    new_content_count = 0
 
-        book = (
-            item.get("book")
-            or item
-        )
+    for index, item in enumerate(books):
+        try:
+            sort = item.get("sort") or 0
+            book = item.get("book") or item
 
-        title = book.get(
-            "title"
-        ) or ""
+            title = book.get("title") or ""
+            cover = (
+                book.get("cover") or ""
+            ).replace("/s_", "/t7_")
 
-        cover = (
-            book.get("cover")
-            or ""
-        ).replace(
-            "/s_",
-            "/t7_",
-        )
+            book_id = book.get("bookId")
+            author = book.get("author") or ""
 
-        book_id = book.get(
-            "bookId"
-        )
+            if not book_id:
+                print(
+                    f"[{index + 1}/{len(books)}] "
+                    f"跳过没有 BookId 的书：{title}"
+                )
+                continue
 
-        author = book.get(
-            "author"
-        ) or ""
+            categories = book.get("categories")
+            if categories is not None:
+                categories = [
+                    x.get("title")
+                    for x in categories
+                    if x.get("title")
+                ]
 
-        if not book_id:
             print(
                 f"[{index + 1}/{len(books)}] "
-                f"跳过没有 BookId 的书："
-                f"{title}"
-            )
-            continue
-
-        categories = book.get(
-            "categories"
-        )
-
-        if categories is not None:
-            categories = [
-                x.get("title")
-                for x in categories
-                if x.get("title")
-            ]
-
-        print(
-            f"[{index + 1}/{len(books)}] "
-            f"正在同步：{title}"
-        )
-
-        # -------------------------------------------------
-        # 1. 查找 Notion 中已有页面
-        # -------------------------------------------------
-
-        existing_page = (
-            find_existing_book(
-                book_id
-            )
-        )
-
-        # -------------------------------------------------
-        # 2. 获取书籍信息
-        # -------------------------------------------------
-
-        if has_any_property(
-            (
-                "ISBN",
-                "评分",
-            )
-        ):
-            isbn, rating = (
-                get_bookinfo(book_id)
-            )
-        else:
-            isbn, rating = (
-                "",
-                None,
+                f"正在同步：《{title}》"
             )
 
-        # -------------------------------------------------
-        # 3. 创建或更新书籍页面
-        # -------------------------------------------------
+            # =====================================================
+            # A. 永远先同步书籍属性
+            #
+            # 这里故意不判断：
+            #   - 有没有划线
+            #   - 有没有笔记
+            #   - 有没有读完
+            #   - Sort 有没有变化
+            #
+            # 因为阅读进度可能变化，而 Sort 不一定变化。
+            # =====================================================
 
-        if existing_page is None:
-            print(
-                f"    → Notion 不存在，创建："
-                f"《{title}》"
-            )
+            existing_page = find_existing_book(book_id)
 
-            page_id = insert_to_notion(
-                title,
-                book_id,
-                cover,
-                sort,
-                author,
-                isbn,
-                rating,
-                categories,
-            )
+            if has_any_property(("ISBN", "评分")):
+                isbn, rating = get_bookinfo(book_id)
+            else:
+                isbn, rating = "", None
 
-            existing_keys = set()
+            read_info = None
+            if has_any_property(
+                ("状态", "阅读时长", "阅读进度", "时间")
+            ):
+                read_info = get_read_info(book_id)
 
-        else:
-            page_id = existing_page[
-                "id"
-            ]
+            if existing_page is None:
+                print(
+                    f"    → Notion 不存在，创建书籍："
+                    f"《{title}》"
+                )
 
-            print(
-                f"    → Notion 已存在，"
-                f"保留原页面并增量更新："
-                f"《{title}》"
-            )
+                page_id = insert_to_notion(
+                    title,
+                    book_id,
+                    cover,
+                    sort,
+                    author,
+                    isbn,
+                    rating,
+                    categories,
+                    read_info=read_info,
+                )
 
-            # 更新书籍属性，但不删除页面
-            try:
+                existing_keys = set()
+                new_book_count += 1
+
+            else:
+                page_id = existing_page["id"]
+
+                print(
+                    f"    → Notion 已存在，"
+                    f"更新书籍属性："
+                    f"《{title}》"
+                )
+
                 update_existing_book_properties(
                     page_id,
                     title,
@@ -1977,125 +1945,46 @@ def sync():
                     isbn,
                     rating,
                     categories,
-                )
-            except Exception as error:
-                print(
-                    f"    → 更新书籍属性失败，"
-                    f"继续同步内容：{error}"
+                    read_info=read_info,
                 )
 
-            existing_keys = (
-                get_existing_block_keys(
+                existing_keys = get_existing_block_keys(
                     page_id
                 )
+                updated_book_count += 1
+
+            # =====================================================
+            # B. 书籍属性同步完成后，再处理划线/笔记
+            #
+            # 没有划线/笔记并不会阻止书籍属性更新。
+            # =====================================================
+
+            added = sync_book_content(
+                page_id=page_id,
+                book_id=book_id,
+                title=title,
+                existing_keys=existing_keys,
             )
 
-        # -------------------------------------------------
-        # 4. 获取章节
-        # -------------------------------------------------
+            new_content_count += added
+            success_count += 1
 
-        chapter = get_chapter_info(
-            book_id
-        )
-
-        # -------------------------------------------------
-        # 5. 获取划线
-        # -------------------------------------------------
-
-        bookmark_list = (
-            get_bookmark_list(
-                book_id
-            )
-        )
-
-        # -------------------------------------------------
-        # 6. 获取笔记/点评
-        # -------------------------------------------------
-
-        summary, reviews = (
-            get_review_list(
-                book_id
-            )
-        )
-
-        bookmark_list.extend(
-            reviews
-        )
-
-        bookmark_list.sort(
-            key=lambda x:
-                get_note_sort_key(
-                    x,
-                    chapter,
-                )
-        )
-
-        # -------------------------------------------------
-        # 7. 没有划线、没有笔记
-        #
-        # 书籍页面已经创建/存在，
-        # 所以这里直接结束，不影响书籍同步。
-        # -------------------------------------------------
-
-        if (
-            not bookmark_list
-            and not summary
-        ):
+        except Exception as error:
+            error_count += 1
             print(
-                f"    → 《{title}》"
-                f"没有划线或笔记，"
-                f"仅保留书籍信息"
+                f"    ✗ 《{title or '未知书籍'}》同步失败："
+                f"{type(error).__name__}: {error}"
             )
+            # 一本书失败不能阻止后面的书继续同步。
             continue
 
-        # -------------------------------------------------
-        # 8. 转换成 Notion blocks
-        # -------------------------------------------------
-
-        children = get_children(
-            chapter,
-            summary,
-            bookmark_list,
-        )
-
-        if not children:
-            print(
-                f"    → 《{title}》"
-                f"没有可写入的内容"
-            )
-            continue
-
-        # -------------------------------------------------
-        # 9. 与 Notion 已有内容比较
-        # -------------------------------------------------
-
-        new_children = (
-            filter_new_children(
-                children,
-                existing_keys,
-            )
-        )
-
-        if not new_children:
-            print(
-                f"    → 《{title}》"
-                f"没有新的划线/笔记"
-            )
-            continue
-
-        # -------------------------------------------------
-        # 10. 增量追加
-        # -------------------------------------------------
-
-        results = add_children(
-            page_id,
-            new_children,
-        )
-
-        print(
-            f"    → 《{title}》"
-            f"新增 {len(results)} 个内容块"
-        )
+    print("")
+    print("========== 同步完成 ==========")
+    print(f"成功：{success_count} 本")
+    print(f"新建：{new_book_count} 本")
+    print(f"更新：{updated_book_count} 本")
+    print(f"新增内容块：{new_content_count}")
+    print(f"失败：{error_count} 本")
 
 
 def main(argv=None):
