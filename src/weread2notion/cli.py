@@ -350,9 +350,25 @@ def get_bookinfo(bookId):
         data.get("newRating")
     )
 
+    # 微信读书 /book/info 返回 publishTime，例如：
+    # "2025-04-01 00:00:00"。
+    # Notion 的“年份”字段使用出版年份（整数）同步。
+    publish_time = data.get("publishTime") or ""
+    year = None
+    if isinstance(publish_time, str):
+        match = re.match(r"^(\d{4})", publish_time.strip())
+        if match:
+            year = int(match.group(1))
+    elif isinstance(publish_time, (int, float)):
+        try:
+            year = datetime.utcfromtimestamp(publish_time).year
+        except (TypeError, ValueError, OSError, OverflowError):
+            year = None
+
     return (
         isbn,
         newRating,
+        year,
     )
 
 
@@ -594,6 +610,36 @@ def load_data_source_schema():
         f"{len(data_source_property_types)} 个，"
         f"标题属性: {title_property_name}"
     )
+
+
+def ensure_year_property():
+    """确保 Notion 数据源存在“年份”字段，并且使用 Number 类型。"""
+    global data_source_property_types
+    global data_source_property_configs
+
+    if "年份" in data_source_property_types:
+        prop_type = data_source_property_types.get("年份")
+        if prop_type != "number":
+            print(
+                f"警告：Notion 的“年份”字段类型是 {prop_type}，"
+                "不是 number，无法写入出版年份。请将该字段改为数字。"
+            )
+        return
+
+    try:
+        client.request(
+            path=f"data_sources/{data_source_id}",
+            method="PATCH",
+            body={
+                "properties": {
+                    "年份": {"number": {}}
+                }
+            },
+        )
+        print("已自动在 Notion 数据源中补充“年份”字段（Number）。")
+        load_data_source_schema()
+    except Exception as error:
+        print(f"警告：自动创建 Notion“年份”字段失败：{error}")
 
 
 def get_property_type(name):
@@ -1179,6 +1225,7 @@ def build_book_raw_properties(
     isbn,
     rating,
     categories,
+    year=None,
     read_info=None,
 ):
     """
@@ -1204,6 +1251,7 @@ def build_book_raw_properties(
         "作者": author,
         "Sort": sort,
         "评分": rating,
+        "年份": year,
     }
 
     if categories is not None:
@@ -1249,6 +1297,7 @@ def insert_to_notion(
     isbn,
     rating,
     categories,
+    year=None,
     read_info=None,
 ):
     """创建新的 Notion 书籍页面。"""
@@ -1274,6 +1323,7 @@ def insert_to_notion(
         isbn=isbn,
         rating=rating,
         categories=categories,
+        year=year,
         read_info=read_info,
     )
 
@@ -1300,10 +1350,11 @@ def update_existing_book_properties(
     isbn,
     rating,
     categories,
+    year=None,
     read_info=None,
 ):
     """
-    更新已经存在的书籍属性。
+    更新已经存在的书籍属性.
 
     不删除页面，不重建页面，不依赖是否存在划线/笔记。
     所以即使一本书“没有划线、没有笔记、还没读完”，
@@ -1322,6 +1373,7 @@ def update_existing_book_properties(
         isbn=isbn,
         rating=rating,
         categories=categories,
+        year=year,
         read_info=read_info,
     )
 
@@ -1862,6 +1914,7 @@ def sync():
     print(f"Notion Data Source ID: {data_source_id}")
 
     load_data_source_schema()
+    ensure_year_property()
 
     books = get_notebooklist()
 
@@ -1924,10 +1977,10 @@ def sync():
 
             existing_page = find_existing_book(book_id)
 
-            if has_any_property(("ISBN", "评分")):
-                isbn, rating = get_bookinfo(book_id)
+            if has_any_property(("ISBN", "评分", "年份")):
+                isbn, rating, year = get_bookinfo(book_id)
             else:
-                isbn, rating = "", None
+                isbn, rating, year = "", None, None
 
             read_info = None
             if has_any_property(
@@ -1950,6 +2003,7 @@ def sync():
                     isbn,
                     rating,
                     categories,
+                    year=year,
                     read_info=read_info,
                 )
 
@@ -1975,6 +2029,7 @@ def sync():
                     isbn,
                     rating,
                     categories,
+                    year=year,
                     read_info=read_info,
                 )
 
