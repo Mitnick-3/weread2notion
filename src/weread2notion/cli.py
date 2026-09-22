@@ -304,6 +304,9 @@ def get_read_info(bookId):
     )
 
     book = data.get("book") or {}
+    # 不同网关版本有时会把阅读进度字段放在 data / response 根层。
+    # 以 book 为主，并对根层和常见别名做兼容。
+    response_root = data if isinstance(data, dict) else {}
 
     progress = to_number(
         book.get("progress")
@@ -344,15 +347,39 @@ def get_read_info(bookId):
     else:
         marked_status = 1
 
+    # 微信读书 /book/getprogress 官方返回：
+    #   startReadingTime = 首次开始阅读时间（Unix 秒）
+    #   updateTime       = 最近阅读时间（Unix 秒）
+    # 某些网关/旧版本可能把字段放在 data/book 外层，因此同时兼容。
+    # 微信读书官方 getprogress：
+    # book.startReadingTime = 首次开始阅读时间（Unix 秒）
+    # book.updateTime       = 最后阅读时间（Unix 秒）
+    # 同时兼容部分网关把字段放到 data/root 或使用别名的情况。
     start_reading_time = (
         book.get("startReadingTime")
         or book.get("startTime")
+        or book.get("firstReadTime")
+        or book.get("firstReadingTime")
+        or response_root.get("startReadingTime")
+        or response_root.get("startTime")
+        or response_root.get("firstReadTime")
+        or response_root.get("firstReadingTime")
         or 0
     )
     last_reading_time = (
         book.get("updateTime")
         or book.get("readUpdateTime")
+        or book.get("lastReadingTime")
+        or book.get("lastReadTime")
+        or response_root.get("updateTime")
+        or response_root.get("readUpdateTime")
+        or response_root.get("lastReadingTime")
+        or response_root.get("lastReadTime")
         or 0
+    )
+
+    print(
+        f"    → 阅读时间原始值：开始={start_reading_time}, 最后={last_reading_time}"
     )
 
     return {
@@ -958,9 +985,17 @@ def build_notion_property(name, value):
         )
 
     if prop_type == "date":
-        return get_date(
-            normalize_date_value(value)
-        )
+        normalized = normalize_date_value(value)
+        if not normalized:
+            return None
+        # 直接构造 Notion Date，确保模板中的日期字段
+        # “开始阅读时间 / 最后阅读时间”不会因为 helper 的
+        # 默认格式或时区设置而被 API 拒绝。
+        return {
+            "date": {
+                "start": normalized,
+            }
+        }
 
     if prop_type == "checkbox":
         return {
@@ -1393,13 +1428,24 @@ def build_book_raw_properties(
             )
 
         if start_reading_time:
-            raw_properties["开始阅读时间"] = normalize_date_value(
-                start_reading_time
-            )
+            normalized_start = normalize_date_value(start_reading_time)
+            if normalized_start:
+                raw_properties["开始阅读时间"] = normalized_start
 
         if last_reading_time:
-            raw_properties["最后阅读时间"] = normalize_date_value(
-                last_reading_time
+            normalized_last = normalize_date_value(last_reading_time)
+            if normalized_last:
+                raw_properties["最后阅读时间"] = normalized_last
+
+        # 模板已经存在这两个日期字段时，打印最终要写入 Notion 的值，
+        # 便于确认问题究竟出在微信读书返回还是 Notion 更新。
+        if "开始阅读时间" in data_source_property_types:
+            print(
+                f"    → 开始阅读时间：{raw_properties.get('开始阅读时间', '无数据')}"
+            )
+        if "最后阅读时间" in data_source_property_types:
+            print(
+                f"    → 最后阅读时间：{raw_properties.get('最后阅读时间', '无数据')}"
             )
 
     return raw_properties
