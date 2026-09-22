@@ -820,11 +820,44 @@ def to_number(value):
 
 
 def normalize_date_value(value):
+    """
+    Normalize all Notion date values to a full ISO-8601 datetime.
+
+    The Notion date helper used by this project includes a time zone.
+    Notion therefore requires both date and time when the time zone is
+    explicitly supplied.  A date-only value such as ``2026-09-22`` causes:
+    "If time zone is explicitly provided, start and end must contain date
+    and time."
+    """
+    if value is None or value == "":
+        return None
+
     if isinstance(value, (int, float)):
         return datetime.utcfromtimestamp(
             value
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        ).strftime("%Y-%m-%dT%H:%M:%S")
 
+    value = str(value).strip()
+
+    # Already a full ISO datetime.
+    if "T" in value:
+        return value[:19]
+
+    # Common API formats returned by WeRead.
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(value, fmt).strftime(
+                "%Y-%m-%dT%H:%M:%S"
+            )
+        except ValueError:
+            continue
+
+    # If an unexpected value is supplied, leave it untouched so the
+    # existing API error still identifies the problematic value.
     return value
 
 
@@ -1328,9 +1361,9 @@ def build_book_raw_properties(
             or finished_date
         )
         if reading_date:
-            raw_properties["时间"] = datetime.utcfromtimestamp(
+            raw_properties["时间"] = normalize_date_value(
                 reading_date
-            ).strftime("%Y-%m-%d")
+            )
 
     return raw_properties
 
