@@ -1026,9 +1026,30 @@ def _relation_value_candidates(value, property_name=None):
 
 
 def _normalize_relation_title(text, property_name):
-    """将目标库标题标准化，允许 6 / 06 / 6月 / 06月 等表示方式。"""
-    text = str(text or "").strip()
-    text = text.replace(" ", "")
+    """标准化 Relation 目标页标题，兼容数字、年月日后缀及附加说明。
+
+    例如：
+      年：2010 / 2010年 / 2010 年 / 2010年（庚寅年） -> 2010
+      月：6 / 06 / 6月 / 06月 / 06 - June -> 6
+      日：1 / 01 / 1日 / 01日 / 01 - Day 1 -> 1
+    """
+    text = str(text or "").strip().replace(" ", "")
+    if not text:
+        return ""
+
+    # 优先提取阿拉伯数字。这样目标页即使带有括号、英文月份、备注等
+    # 附加文字，也能匹配到实际的年月日数字。
+    match = re.search(r"\d+", text)
+    if match:
+        number_text = match.group(0)
+        try:
+            number = int(number_text)
+            if property_name == "年" and len(number_text) >= 4:
+                return str(number)
+            if property_name in ("月", "日") and 1 <= number <= 31:
+                return str(number)
+        except (TypeError, ValueError):
+            pass
 
     if property_name == "年":
         text = text.rstrip("年")
@@ -1059,8 +1080,10 @@ def find_relation_page_id(property_name, value):
 
     title_name = _relation_title_property(target_ds)
     if not title_name:
-        print(f"    → Relation「{property_name}」目标数据源没有 Title 字段")
+        print(f"    → Relation「{property_name}」目标数据源没有 Title 字段，目标数据源：{target_ds}")
         return None
+
+    print(f"    → Relation「{property_name}」目标数据源：{target_ds}，Title：{title_name}，候选：{candidates}")
 
     # 第一轮：精确匹配。
     for candidate in candidates:
