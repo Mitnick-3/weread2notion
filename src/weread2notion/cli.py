@@ -1415,7 +1415,8 @@ def build_book_raw_properties(
                 # 这样不会因为一个“未开始”的书导致整本书属性更新失败。
                 raw_properties.pop("状态", None)
 
-        raw_properties["阅读时长"] = format_reading_time(reading_time)
+        # Notion「阅读时长」是 Number 类型，必须写入纯数字（秒），不能写“1小时20分钟”这类文本。
+        raw_properties["阅读时长"] = to_number(reading_time) or 0
         raw_properties["阅读进度"] = reading_progress
 
         reading_date = (
