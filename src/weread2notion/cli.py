@@ -344,11 +344,24 @@ def get_read_info(bookId):
     else:
         marked_status = 1
 
+    start_reading_time = (
+        book.get("startReadingTime")
+        or book.get("startTime")
+        or 0
+    )
+    last_reading_time = (
+        book.get("updateTime")
+        or book.get("readUpdateTime")
+        or 0
+    )
+
     return {
         "markedStatus": marked_status,
         "readingTime": reading_time,
         "readingProgress": reading_progress,
-        # “时间”字段同步最近一次阅读时间；
+        "startReadingTime": start_reading_time,
+        "lastReadingTime": last_reading_time,
+        # “时间”字段继续同步最近一次阅读时间；
         # 如果已经读完，则优先使用完成时间。
         "readingDate": finish_time or update_time,
         "finishedDate": finish_time,
@@ -660,29 +673,41 @@ def ensure_year_property():
     global data_source_property_types
     global data_source_property_configs
 
-    if "年份" in data_source_property_types:
-        prop_type = data_source_property_types.get("年份")
-        if prop_type != "number":
+    properties_to_add = {}
+
+    if "年份" not in data_source_property_types:
+        properties_to_add["年份"] = {"number": {}}
+    elif data_source_property_types.get("年份") != "number":
+        print(
+            f"警告：Notion 的“年份”字段类型是 "
+            f"{data_source_property_types.get('年份')}，不是 number，"
+            "无法写入出版年份。请将该字段改为数字。"
+        )
+
+    for name in ("开始阅读时间", "最后阅读时间"):
+        if name not in data_source_property_types:
+            properties_to_add[name] = {"date": {}}
+        elif data_source_property_types.get(name) != "date":
             print(
-                f"警告：Notion 的“年份”字段类型是 {prop_type}，"
-                "不是 number，无法写入出版年份。请将该字段改为数字。"
+                f"警告：Notion 的“{name}”字段类型是 "
+                f"{data_source_property_types.get(name)}，不是 date，"
+                "无法写入阅读时间。请将该字段改为日期类型。"
             )
+
+    if not properties_to_add:
         return
 
     try:
         client.request(
             path=f"data_sources/{data_source_id}",
             method="PATCH",
-            body={
-                "properties": {
-                    "年份": {"number": {}}
-                }
-            },
+            body={"properties": properties_to_add},
         )
-        print("已自动在 Notion 数据源中补充“年份”字段（Number）。")
+        added = "、".join(properties_to_add.keys())
+        print(f"已自动在 Notion 数据源中补充字段：{added}。")
         load_data_source_schema()
     except Exception as error:
-        print(f"警告：自动创建 Notion“年份”字段失败：{error}")
+        print(f"警告：自动创建 Notion 字段失败：{error}")
 
 
 def get_property_type(name):
@@ -1338,6 +1363,8 @@ def build_book_raw_properties(
         reading_time = read_info.get("readingTime", 0)
         reading_progress = read_info.get("readingProgress", 0)
         finished_date = read_info.get("finishedDate") or 0
+        start_reading_time = read_info.get("startReadingTime") or 0
+        last_reading_time = read_info.get("lastReadingTime") or 0
 
         if marked_status == 4:
             raw_properties["状态"] = "读完"
@@ -1363,6 +1390,16 @@ def build_book_raw_properties(
         if reading_date:
             raw_properties["时间"] = normalize_date_value(
                 reading_date
+            )
+
+        if start_reading_time:
+            raw_properties["开始阅读时间"] = normalize_date_value(
+                start_reading_time
+            )
+
+        if last_reading_time:
+            raw_properties["最后阅读时间"] = normalize_date_value(
+                last_reading_time
             )
 
     return raw_properties
@@ -1391,7 +1428,7 @@ def insert_to_notion(
     }
 
     if read_info is None and has_any_property(
-        ("状态", "阅读时长", "阅读进度", "时间")
+        ("状态", "阅读时长", "阅读进度", "时间", "开始阅读时间", "最后阅读时间")
     ):
         read_info = get_read_info(bookId)
 
@@ -1441,7 +1478,7 @@ def update_existing_book_properties(
     它的阅读进度/状态/阅读时长仍然会更新。
     """
     if read_info is None and has_any_property(
-        ("状态", "阅读时长", "阅读进度", "时间")
+        ("状态", "阅读时长", "阅读进度", "时间", "开始阅读时间", "最后阅读时间")
     ):
         read_info = get_read_info(bookId)
 
@@ -2071,7 +2108,7 @@ def sync():
 
             read_info = None
             if has_any_property(
-                ("状态", "阅读时长", "阅读进度", "时间")
+                ("状态", "阅读时长", "阅读进度", "时间", "开始阅读时间", "最后阅读时间")
             ):
                 read_info = get_read_info(book_id)
 
@@ -2080,8 +2117,13 @@ def sync():
                     f"{round(read_info.get('readingProgress', 0) * 100)}%，"
                     f"{format_reading_time(read_info.get('readingTime', 0))}"
                     + (
-                        f"，日期 {read_info.get('readingDate')}"
-                        if read_info.get("readingDate")
+                        f"，开始 {read_info.get('startReadingTime')}"
+                        if read_info.get("startReadingTime")
+                        else ""
+                    )
+                    + (
+                        f"，最后阅读 {read_info.get('lastReadingTime')}"
+                        if read_info.get("lastReadingTime")
                         else ""
                     )
                 )
