@@ -31,8 +31,6 @@ client = None
 data_source_id = None
 data_source_property_types = {}
 data_source_property_configs = {}
-relation_target_cache = {}
-relation_page_cache = {}
 title_property_name = None
 skipped_property_names = set()
 weread = None
@@ -438,32 +436,22 @@ def get_bookinfo(bookId):
     # "2025-04-01 00:00:00"。
     # Notion 的“年份”字段使用出版年份（整数）同步。
     publish_time = data.get("publishTime") or ""
-    year = month = day = None
+    year = None
     if isinstance(publish_time, str):
         value = publish_time.strip()
-        # 支持：2025-04-01 00:00:00 / 2025-04-01 / 2025/04/01 等常见格式。
-        match = re.search(r"(\d{4})[-/]?(\d{1,2})[-/]?(\d{1,2})", value)
+        match = re.search(r"(\d{4})", value)
         if match:
             year = int(match.group(1))
-            month = int(match.group(2))
-            day = int(match.group(3))
-        else:
-            match = re.search(r"(\d{4})", value)
-            if match:
-                year = int(match.group(1))
     elif isinstance(publish_time, (int, float)):
         try:
-            dt = datetime.utcfromtimestamp(publish_time)
-            year, month, day = dt.year, dt.month, dt.day
+            year = datetime.utcfromtimestamp(publish_time).year
         except (TypeError, ValueError, OSError, OverflowError):
-            pass
+            year = None
 
     return (
         isbn,
         newRating,
         year,
-        month,
-        day,
     )
 
 
@@ -952,138 +940,6 @@ def build_option_property(prop_type, value, property_name=None):
     return get_multi_select(names)
 
 
-def _relation_target_data_source_id(property_name):
-    """读取 Relation 字段指向的目标 data source ID。"""
-    config = data_source_property_configs.get(property_name) or {}
-    relation = config.get("relation") or {}
-    target = relation.get("data_source_id") or relation.get("database_id")
-
-    if not target:
-        return None
-
-    # 新版 Notion API 优先直接使用 data_source_id；旧 schema 可能只返回 database_id。
-    if relation.get("data_source_id"):
-        return relation.get("data_source_id")
-
-    try:
-        return resolve_data_source_id(target)
-    except Exception as error:
-        print(f"    → Relation「{property_name}」无法解析目标数据源：{error}")
-        return None
-
-
-def _relation_title_property(data_source_id_value):
-    """获取 Relation 目标数据源的 Title 属性名。"""
-    if data_source_id_value in relation_target_cache:
-        return relation_target_cache[data_source_id_value].get("title_property")
-
-    response = client.request(
-        path=f"data_sources/{data_source_id_value}",
-        method="GET",
-    )
-    properties = response.get("properties") or {}
-    title_name = next(
-        (
-            name for name, prop in properties.items()
-            if (prop or {}).get("type") == "title"
-        ),
-        None,
-    )
-    relation_target_cache[data_source_id_value] = {
-        "properties": properties,
-        "title_property": title_name,
-    }
-    return title_name
-
-
-def _relation_value_candidates(value):
-    """生成 Relation 页面标题的候选值，兼容 1 / 01 等写法。"""
-    if value is None or value == "":
-        return []
-
-    text_value = str(value).strip()
-    candidates = [text_value]
-
-    try:
-        number = int(float(text_value))
-        candidates.extend([str(number), f"{number:02d}"])
-    except (TypeError, ValueError):
-        pass
-
-    # 去重并保持顺序。
-    return list(dict.fromkeys(candidates))
-
-
-def find_relation_page_id(property_name, value):
-    """根据 Relation 目标库中的 Title 找到页面 ID。"""
-    target_ds = _relation_target_data_source_id(property_name)
-    if not target_ds:
-        return None
-
-    candidates = _relation_value_candidates(value)
-    if not candidates:
-        return None
-
-    cache_key = (target_ds, tuple(candidates))
-    if cache_key in relation_page_cache:
-        return relation_page_cache[cache_key]
-
-    title_name = _relation_title_property(target_ds)
-    if not title_name:
-        print(f"    → Relation「{property_name}」目标数据源没有 Title 字段")
-        return None
-
-    for candidate in candidates:
-        body = {
-            "filter": {
-                "property": title_name,
-                "title": {"equals": candidate},
-            },
-            "page_size": 10,
-        }
-        response = client.request(
-            path=f"data_sources/{target_ds}/query",
-            method="POST",
-            body=body,
-        )
-        results = response.get("results") or []
-        if results:
-            page_id = results[0].get("id")
-            relation_page_cache[cache_key] = page_id
-            return page_id
-
-    print(
-        f"    → Relation「{property_name}」找不到目标页面：{value}"
-    )
-    relation_page_cache[cache_key] = None
-    return None
-
-
-def build_relation_property(name, value):
-    """把年/月/日等 Relation 值转换为 Notion page ID。"""
-    values = value if isinstance(value, (list, tuple, set)) else [value]
-    page_ids = []
-
-    for item in values:
-        if isinstance(item, dict):
-            page_id = item.get("id")
-        else:
-            page_id = find_relation_page_id(name, item)
-
-        if page_id:
-            page_ids.append(page_id)
-
-    if not page_ids:
-        return None
-
-    return {
-        "relation": [
-            {"id": page_id}
-            for page_id in dict.fromkeys(page_ids)
-        ]
-    }
-
-
 def build_notion_property(name, value):
     prop_type = get_property_type(name)
 
@@ -1127,9 +983,6 @@ def build_notion_property(name, value):
             value,
             property_name=name,
         )
-
-    if prop_type == "relation":
-        return build_relation_property(name, value)
 
     if prop_type == "date":
         normalized = normalize_date_value(value)
@@ -1208,9 +1061,10 @@ def get_number_property_value(property_value):
 
 
 def resolve_data_source_id(notion_id):
-    if os.getenv("NOTION_DATA_SOURCE_ID"):
-        return notion_id
-
+    # 这里不能依赖 NOTION_DATA_SOURCE_ID 环境变量。
+    # Relation 字段的 relation.database_id 指向的是“目标数据库”，
+    # 它通常不是当前书籍数据库使用的 data_source_id。
+    # 必须先尝试把传入 ID 当作 data source，再回退到 database -> data source。
     try:
         client.request(
             path=f"data_sources/{notion_id}",
@@ -1509,8 +1363,6 @@ def build_book_raw_properties(
     rating,
     categories,
     year=None,
-    month=None,
-    day=None,
     read_info=None,
 ):
     """
@@ -1538,15 +1390,6 @@ def build_book_raw_properties(
         "评分": rating,
         "年份": year,
     }
-
-    # “年 / 月 / 日”是 Relation 类型时，值来自微信读书的出版日期，
-    # 后续由 build_notion_property() 自动查找目标库中对应页面并写入 page_id。
-    if year is not None and get_property_type("年") == "relation":
-        raw_properties["年"] = year
-    if month is not None and get_property_type("月") == "relation":
-        raw_properties["月"] = month
-    if day is not None and get_property_type("日") == "relation":
-        raw_properties["日"] = day
 
     if categories is not None:
         raw_properties["分类"] = categories
@@ -1620,8 +1463,6 @@ def insert_to_notion(
     rating,
     categories,
     year=None,
-    month=None,
-    day=None,
     read_info=None,
 ):
     """创建新的 Notion 书籍页面。"""
@@ -1648,8 +1489,6 @@ def insert_to_notion(
         rating=rating,
         categories=categories,
         year=year,
-        month=month,
-        day=day,
         read_info=read_info,
     )
 
@@ -1677,8 +1516,6 @@ def update_existing_book_properties(
     rating,
     categories,
     year=None,
-    month=None,
-    day=None,
     read_info=None,
 ):
     """
@@ -1702,8 +1539,6 @@ def update_existing_book_properties(
         rating=rating,
         categories=categories,
         year=year,
-        month=month,
-        day=day,
         read_info=read_info,
     )
 
@@ -2314,11 +2149,10 @@ def sync():
 
             existing_page = find_existing_book(book_id)
 
-            if has_any_property(("ISBN", "评分", "年份", "年", "月", "日")):
-                isbn, rating, year, month, day = get_bookinfo(book_id)
-                print(f"    → 出版日期：{year}-{month}-{day}")
+            if has_any_property(("ISBN", "评分", "年份")):
+                isbn, rating, year = get_bookinfo(book_id)
             else:
-                isbn, rating, year, month, day = "", None, None, None, None
+                isbn, rating, year = "", None, None
 
             read_info = None
             if has_any_property(
@@ -2358,8 +2192,6 @@ def sync():
                     rating,
                     categories,
                     year=year,
-                    month=month,
-                    day=day,
                     read_info=read_info,
                 )
 
@@ -2386,8 +2218,6 @@ def sync():
                     rating,
                     categories,
                     year=year,
-                    month=month,
-                    day=day,
                     read_info=read_info,
                 )
 
