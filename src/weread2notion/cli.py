@@ -266,10 +266,32 @@ def get_bookmark_list(bookId):
         bookId=bookId,
     )
 
-    updated = data.get("updated") or []
+    updated = (
+        data.get("updated")
+        or data.get("items")
+        or []
+    )
+
+    if not isinstance(updated, list):
+        updated = []
+
+    # /book/bookmarklist 的正式返回字段是 updated[].markText。
+    # 某些网关版本可能把内容放在 items 中，兼容两种结构。
+    normalized = []
+    for item in updated:
+        if not isinstance(item, dict):
+            continue
+        item = dict(item)
+        if not item.get("markText"):
+            item["markText"] = (
+                item.get("text")
+                or item.get("content")
+                or ""
+            )
+        normalized.append(item)
 
     return sorted(
-        updated,
+        normalized,
         key=get_note_sort_key,
     )
 
@@ -291,8 +313,25 @@ def get_read_info(bookId):
         progress
     )
 
-    finish_time = book.get("finishTime") or 0
-    update_time = book.get("updateTime") or 0
+    finish_time = (
+        book.get("finishTime")
+        or book.get("finishReadingTime")
+        or 0
+    )
+    update_time = (
+        book.get("updateTime")
+        or book.get("readUpdateTime")
+        or 0
+    )
+
+    # 微信读书 getprogress 的累计阅读时长字段是 readingTime。
+    # recordReadingTime 在部分返回中只是记录/上报字段，不能作为总阅读时长。
+    reading_time = (
+        book.get("readingTime")
+        or book.get("totalReadTime")
+        or book.get("recordReadingTime")
+        or 0
+    )
 
     if finish_time or progress >= 100:
         marked_status = 4
@@ -307,8 +346,11 @@ def get_read_info(bookId):
 
     return {
         "markedStatus": marked_status,
-        "readingTime": book.get("recordReadingTime") or 0,
+        "readingTime": reading_time,
         "readingProgress": reading_progress,
+        # “时间”字段同步最近一次阅读时间；
+        # 如果已经读完，则优先使用完成时间。
+        "readingDate": finish_time or update_time,
         "finishedDate": finish_time,
     }
 
@@ -356,7 +398,8 @@ def get_bookinfo(bookId):
     publish_time = data.get("publishTime") or ""
     year = None
     if isinstance(publish_time, str):
-        match = re.match(r"^(\d{4})", publish_time.strip())
+        value = publish_time.strip()
+        match = re.search(r"(\d{4})", value)
         if match:
             year = int(match.group(1))
     elif isinstance(publish_time, (int, float)):
@@ -1280,10 +1323,14 @@ def build_book_raw_properties(
         raw_properties["阅读时长"] = format_reading_time(reading_time)
         raw_properties["阅读进度"] = reading_progress
 
-        if finished_date:
+        reading_date = (
+            read_info.get("readingDate")
+            or finished_date
+        )
+        if reading_date:
             raw_properties["时间"] = datetime.utcfromtimestamp(
-                finished_date
-            ).strftime("%Y-%m-%d %H:%M:%S")
+                reading_date
+            ).strftime("%Y-%m-%d")
 
     return raw_properties
 
@@ -1397,6 +1444,13 @@ def sync_book_content(page_id, book_id, title, existing_keys=None):
 
     bookmark_list = get_bookmark_list(book_id)
     summary, reviews = get_review_list(book_id)
+
+    print(
+        f"    → 微信读书内容："
+        f"划线 {len(bookmark_list)} 条，"
+        f"笔记 {len(reviews)} 条，"
+        f"点评 {len(summary)} 条"
+    )
 
     # 没有任何内容时，直接结束。
     if not bookmark_list and not reviews and not summary:
@@ -1987,6 +2041,17 @@ def sync():
                 ("状态", "阅读时长", "阅读进度", "时间")
             ):
                 read_info = get_read_info(book_id)
+
+                print(
+                    f"    → 阅读信息："
+                    f"{round(read_info.get('readingProgress', 0) * 100)}%，"
+                    f"{format_reading_time(read_info.get('readingTime', 0))}"
+                    + (
+                        f"，日期 {read_info.get('readingDate')}"
+                        if read_info.get("readingDate")
+                        else ""
+                    )
+                )
 
             if existing_page is None:
                 print(
