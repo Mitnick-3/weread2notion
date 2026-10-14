@@ -12,14 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ============修复：先创建目录，再下载解压Skill============
+      # 打印当前目录文件，用于排查 main.py 是否存在
+      - name: Debug list files
+        run: |
+          pwd
+          ls -la
+
+      # 创建目录、下载更新微信读书skill
       - name: Upgrade WeRead Skill
         run: |
           mkdir -p ./skills/weread
           curl -L -o weread-skills.zip https://cdn.weread.qq.com/skills/weread-skills.zip
           unzip -o weread-skills.zip -d ./skills/weread
           rm weread-skills.zip
-      # =========================================================
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,9 +36,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run
+      - name: Run main.py
         env:
           WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python main.py
+        run: |
+          pwd
+          ls -la
+          python main.py
