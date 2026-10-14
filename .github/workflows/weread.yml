@@ -12,9 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ============新增：自动升级微信读书Skill到1.0.5============
+      # ============修复：先创建目录，再下载解压Skill============
       - name: Upgrade WeRead Skill
         run: |
+          mkdir -p ./skills/weread
           curl -L -o weread-skills.zip https://cdn.weread.qq.com/skills/weread-skills.zip
           unzip -o weread-skills.zip -d ./skills/weread
           rm weread-skills.zip
