@@ -12,11 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 打印当前目录文件，用于排查 main.py 是否存在
       - name: Debug list files
         run: |
           pwd
           ls -la
+          ls -la src
+          ls -la scripts
 
       # 创建目录、下载更新微信读书skill
       - name: Upgrade WeRead Skill
@@ -35,13 +36,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -e .
 
-      - name: Run main.py
+      - name: Run weread2notion
         env:
           WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
-          pwd
-          ls -la
-          python main.py
+          python -m src
