@@ -12,14 +12,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Debug list files
+      - name: Debug list all files
         run: |
           pwd
           ls -la
+          echo "==== src目录 ===="
           ls -la src
+          echo "==== scripts目录 ===="
           ls -la scripts
 
-      # 创建目录、下载更新微信读书skill
+      # 升级微信读书Skill
       - name: Upgrade WeRead Skill
         run: |
           mkdir -p ./skills/weread
@@ -38,10 +40,11 @@ jobs:
           pip install -r requirements.txt
           pip install -e .
 
-      - name: Run weread2notion
+      - name: Run sync script
         env:
           WEREAD_API_KEY: ${{ secrets.WEREAD_API_KEY }}
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
-          python -m src
+          # 先看scripts里面的py文件，优先执行scripts下的脚本
+          ls scripts/*.py
